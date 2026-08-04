@@ -1,109 +1,109 @@
-# We'll be using publicly available modules for creating different services instead of resources
-# https://registry.terraform.io/browse/modules?provider=aws
-
-# Creating a VPC
-module "vpc" {
-  source = "terraform-aws-modules/vpc/aws"
-
-  name = var.vpc_name
-  cidr = var.vpc_cidr
-
-  azs            = data.aws_availability_zones.azs.names
-  public_subnets = var.public_subnets
-  map_public_ip_on_launch = true
-
-  enable_dns_hostnames = true
-
-  tags = {
-    Name        = var.vpc_name
-    Terraform   = "true"
-    Environment = "dev"
-  }
-
-  public_subnet_tags = {
-    Name = "jenkins-subnet"
-  }
-}
-
-# SG
-module "sg" {
-  source = "terraform-aws-modules/security-group/aws"
-
-  name        = var.jenkins_security_group
-  description = "Security Group for Jenkins Server"
-  vpc_id      = module.vpc.vpc_id
-
-  ingress_with_cidr_blocks = [
-    {
-      from_port   = 8080
-      to_port     = 8080
-      protocol    = "tcp"
-      description = "JenkinsPort"
-      cidr_blocks = "0.0.0.0/0"
-    },
-    {
-      from_port   = 443
-      to_port     = 443
-      protocol    = "tcp"
-      description = "HTTPS"
-      cidr_blocks = "0.0.0.0/0"
-    },
-    {
-      from_port   = 80
-      to_port     = 80
-      protocol    = "tcp"
-      description = "HTTP"
-      cidr_blocks = "0.0.0.0/0"
-    },
-    {
-      from_port   = 22
-      to_port     = 22
-      protocol    = "tcp"
+locals {
+  ingress_ports = {
+    ssh = {
+      port        = 22
       description = "SSH"
-      cidr_blocks = "0.0.0.0/0"
-    },
-    {
-      from_port   = 9000
-      to_port     = 9000
-      protocol    = "tcp"
-      description = "SonarQubePort"
-      cidr_blocks = "0.0.0.0/0"
     }
-  ]
 
-  egress_with_cidr_blocks = [
-    {
-      from_port   = 0
-      to_port     = 0
-      protocol    = "-1"
-      cidr_blocks = "0.0.0.0/0"
+    jenkins = {
+      port        = 8080
+      description = "Jenkins UI"
     }
-  ]
 
-  tags = {
-    Name = "jenkins-sg"
+    sonarqube = {
+      port        = 9000
+      description = "SonarQube UI"
+    }
   }
 }
 
-# EC2
-module "ec2_instance" {
-  source = "terraform-aws-modules/ec2-instance/aws"
-
-  name = var.jenkins_ec2_instance
-
-  instance_type               = var.instance_type
-  ami                         = "ami-0e8a34246278c21e4"
-  key_name                    = "jenkins_server_keypair"
-  monitoring                  = true
-  vpc_security_group_ids      = [module.sg.security_group_id]
-  subnet_id                   = module.vpc.public_subnets[0]
-  associate_public_ip_address = true
-  user_data                   = file("../scripts/install_build_tools.sh")
-  availability_zone           = data.aws_availability_zones.azs.names[0]
+resource "aws_security_group" "jenkins" {
+  name        = "${var.project_name}-jenkins-sg"
+  description = "Restricted access to Jenkins server"
+  vpc_id      = var.existing_vpc_id
 
   tags = {
-    Name        = "Jenkins-Server"
-    Terraform   = "true"
-    Environment = "dev"
+    Name = "${var.project_name}-jenkins-sg"
+  }
+}
+
+resource "aws_vpc_security_group_ingress_rule" "jenkins" {
+  for_each = local.ingress_ports
+
+  security_group_id = aws_security_group.jenkins.id
+  description       = each.value.description
+
+  cidr_ipv4   = var.admin_cidr
+  ip_protocol = "tcp"
+  from_port   = each.value.port
+  to_port     = each.value.port
+}
+
+resource "aws_vpc_security_group_egress_rule" "all" {
+  security_group_id = aws_security_group.jenkins.id
+
+  cidr_ipv4   = "0.0.0.0/0"
+  ip_protocol = "-1"
+}
+
+resource "aws_iam_role" "jenkins" {
+  name               = "${var.project_name}-jenkins-role"
+  assume_role_policy = data.aws_iam_policy_document.ec2_assume_role.json
+
+  tags = {
+    Name = "${var.project_name}-jenkins-role"
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "ssm" {
+  role       = aws_iam_role.jenkins.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+# Lab access. Replace later with a least-privilege policy.
+resource "aws_iam_role_policy_attachment" "administrator_lab" {
+  role       = aws_iam_role.jenkins.name
+  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
+}
+
+resource "aws_iam_instance_profile" "jenkins" {
+  name = "${var.project_name}-jenkins-profile"
+  role = aws_iam_role.jenkins.name
+}
+
+resource "aws_instance" "jenkins" {
+  ami           = nonsensitive(data.aws_ssm_parameter.al2023.value)
+  instance_type = var.instance_type
+  key_name      = var.key_name
+
+  subnet_id                   = var.existing_public_subnet_id
+  vpc_security_group_ids      = [aws_security_group.jenkins.id]
+  associate_public_ip_address = true
+  iam_instance_profile        = aws_iam_instance_profile.jenkins.name
+
+  monitoring = true
+
+  user_data                   = file("${path.module}/../scripts/install_build_tools.sh")
+  user_data_replace_on_change = true
+
+  root_block_device {
+    volume_type           = "gp3"
+    volume_size           = 50
+    encrypted             = true
+    delete_on_termination = true
+  }
+
+  metadata_options {
+    http_endpoint = "enabled"
+    http_tokens   = "required"
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.ssm,
+    aws_iam_role_policy_attachment.administrator_lab
+  ]
+
+  tags = {
+    Name = "${var.project_name}-jenkins"
   }
 }

@@ -1,66 +1,179 @@
-pipeline{
+pipeline {
     agent any
-    environment {
-        AWS_ACCESS_KEY_ID = credentials('AWS_ACCESS_KEY_ID')
-        AWS_SECRET_ACCESS_KEY = credentials('AWS_SECRET_ACCESS_KEY')
-        AWS_DEFAULT_REGION = "us-east-1"
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        skipDefaultCheckout(true)
+        timeout(time: 30, unit: 'MINUTES')
     }
+
+    environment {
+        AWS_REGION     = 'us-east-1'
+        AWS_DEFAULT_REGION = 'us-east-1'
+        CLUSTER_NAME   = 'my-eks-cluster'
+        NAMESPACE      = 'eks-test'
+        APP_IMAGE      = 'nginx:alpine'
+    }
+
     stages {
-        stage('Checkout SCM') {
+        stage('Checkout') {
             steps {
-                script {
-                    checkout scmGit(branches: [[name: '*/main']], extensions: [], userRemoteConfigs: [[url: 'https://github.com/vishal2505/terraform-eks-cicd.git']])
+                checkout scm
+            }
+        }
+
+        stage('Verify Tools and Identity') {
+            steps {
+                sh '''
+                    set -eu
+
+                    echo "=== AWS identity ==="
+                    aws sts get-caller-identity
+
+                    echo "=== Tool versions ==="
+                    terraform version
+                    kubectl version --client
+                    helm version
+                    trivy --version
+                    docker version
+                '''
+            }
+        }
+
+        stage('Validate Terraform') {
+            steps {
+                dir('DevOps-Project-19/tf-aws-eks') {
+                    sh '''
+                        set -eu
+
+                        terraform fmt -check -diff \
+                          *.tf \
+                          variables/dev.tfvars
+
+                        terraform init \
+                          -backend=false \
+                          -input=false
+
+                        terraform validate
+                    '''
                 }
             }
         }
-        stage('Initializing Terraform'){
+
+        stage('Configure EKS Access') {
             steps {
-                script {
-                    dir('tf-aws-eks'){
-                        sh 'terraform init'
-                    }
-                }
+                sh '''
+                    set -eu
+
+                    aws eks update-kubeconfig \
+                      --name "$CLUSTER_NAME" \
+                      --region "$AWS_REGION"
+
+                    kubectl get nodes
+                    kubectl auth can-i '*' '*' --all-namespaces
+                '''
             }
         }
-        stage('Validating Terraform'){
+
+        stage('Validate Kubernetes Manifests') {
             steps {
-                script {
-                    dir('tf-aws-eks'){
-                        sh 'terraform validate'
-                    }
-                }
+                sh '''
+                    set -eu
+
+                    kubectl apply \
+                      --dry-run=server \
+                      -f DevOps-Project-19/manifest/
+                '''
             }
         }
-        stage('Terraform Plan'){
+
+        stage('Trivy Image Scan') {
             steps {
-                script {
-                    dir('tf-aws-eks'){
-                        sh 'terraform plan -var-file=variables/dev.tfvars'
-                    }
-                    input(message: "Are you sure to proceed?", ok: "Proceed")
-                }
+                sh '''
+                    set -eu
+
+                    trivy image \
+                      --timeout 10m \
+                      --severity HIGH,CRITICAL \
+                      --format table \
+                      --output trivy-report.txt \
+                      "$APP_IMAGE" || true
+
+                    cat trivy-report.txt
+                '''
             }
         }
-        stage('Creating/Destroying EKS Cluster'){
+
+        stage('Deploy to EKS') {
             steps {
-                script {
-                    dir('tf-aws-eks'){
-                        sh 'terraform $action -var-file=variables/dev.tfvars -auto-approve' 
-                    }
-                }
+                sh '''
+                    set -eu
+
+                    kubectl apply \
+                      -f DevOps-Project-19/manifest/
+                '''
             }
         }
-        stage('Deploying Nginx Application') {
-            steps{
-                script{
-                    dir('manifest') {
-                        sh 'aws eks update-kubeconfig --name my-eks-cluster'
-                        sh 'kubectl create namespace eks-nginx-app'
-                        sh 'kubectl apply -f deployment.yaml -n eks-nginx-app'
-                        sh 'kubectl apply -f service.yaml -n eks-nginx-app'
-                    }
-                }
+
+        stage('Verify Rollout') {
+            steps {
+                sh '''
+                    set -eu
+
+                    kubectl rollout status \
+                      deployment/nginx \
+                      -n "$NAMESPACE" \
+                      --timeout=180s
+
+                    echo "=== Pods ==="
+                    kubectl get pods \
+                      -n "$NAMESPACE" \
+                      -o wide
+
+                    echo "=== Service ==="
+                    kubectl get service nginx-service \
+                      -n "$NAMESPACE"
+
+                    echo "=== Ingress ==="
+                    kubectl get ingress nginx-ingress \
+                      -n "$NAMESPACE"
+                '''
             }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts(
+                artifacts: 'trivy-report.txt',
+                allowEmptyArchive: true
+            )
+        }
+
+        success {
+            sh '''
+                echo "Deployment completed successfully."
+
+                ALB_DNS=$(kubectl get ingress nginx-ingress \
+                  -n "$NAMESPACE" \
+                  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+
+                echo "Application URL: http://${ALB_DNS}"
+            '''
+        }
+
+        failure {
+            sh '''
+                echo "Pipeline failed. Collecting diagnostics..."
+
+                kubectl get all \
+                  -n "$NAMESPACE" || true
+
+                kubectl get events \
+                  -n "$NAMESPACE" \
+                  --sort-by=.metadata.creationTimestamp || true
+            '''
         }
     }
 }
