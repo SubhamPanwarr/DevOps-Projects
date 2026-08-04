@@ -1,35 +1,44 @@
-# We'll be using publicly available modules for creating different services instead of resources
-# https://registry.terraform.io/browse/modules?provider=aws
+locals {
+  availability_zones = slice(
+    data.aws_availability_zones.available.names,
+    0,
+    length(var.private_subnets)
+  )
+}
 
-# Creating a VPC
 module "vpc" {
-  source = "terraform-aws-modules/vpc/aws"
+  source  = "terraform-aws-modules/vpc/aws"
+  version = "~> 6.0"
 
   name = var.vpc_name
   cidr = var.vpc_cidr
 
-  azs            = data.aws_availability_zones.azs.names
-  public_subnets = var.public_subnets
+  azs             = local.availability_zones
+  public_subnets  = var.public_subnets
   private_subnets = var.private_subnets
 
-
+  enable_dns_support   = true
   enable_dns_hostnames = true
+
+  map_public_ip_on_launch = true
+
   enable_nat_gateway = true
+
+  # Lab configuration: one NAT Gateway instead of one per AZ.
   single_nat_gateway = true
 
-  tags = {
-    "kubernetes.io/cluster/my-eks-cluster" = "shared"
-    Terraform   = "true"
-    Environment = "dev"
-  }
-
   public_subnet_tags = {
-    "kubernetes.io/cluster/my-eks-cluster" = "shared"
-    "kubernetes.io/role/elb" = 1
+    "kubernetes.io/role/elb"                    = "1"
+    "kubernetes.io/cluster/${var.cluster_name}" = "shared"
   }
 
   private_subnet_tags = {
-    "kubernetes.io/cluster/my-eks-cluster" = "shared"
-    "kubernetes.io/role/internal-elb" = 1
+    "kubernetes.io/role/internal-elb"           = "1"
+    "kubernetes.io/cluster/${var.cluster_name}" = "shared"
+  }
+
+  tags = {
+    Name                                        = var.vpc_name
+    "kubernetes.io/cluster/${var.cluster_name}" = "shared"
   }
 }
