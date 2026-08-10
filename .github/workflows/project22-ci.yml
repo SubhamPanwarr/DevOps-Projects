@@ -1,0 +1,97 @@
+name: Project 22 CI
+
+on:
+  push:
+    paths:
+      - "DevOps-Project-22/**"
+      - ".github/workflows/project22-ci.yml"
+      - ".github/workflows/project22-deploy.yml"
+  pull_request:
+    paths:
+      - "DevOps-Project-22/**"
+      - ".github/workflows/project22-ci.yml"
+      - ".github/workflows/project22-deploy.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  application:
+    name: Node.js validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    defaults:
+      run:
+        working-directory: DevOps-Project-22/serverless-api
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Configure Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: DevOps-Project-22/serverless-api/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev
+
+      - name: Check JavaScript syntax
+        run: |
+          node --check index.js
+          find api -type f -name '*.js' -print0 |
+            xargs -0 -r -n1 node --check
+
+      - name: Run local health check
+        run: |
+          node index.js >/tmp/project22-api.log 2>&1 &
+          api_pid=$!
+          trap 'kill "$api_pid" 2>/dev/null || true' EXIT
+
+          for attempt in $(seq 1 10); do
+            echo "Health check attempt ${attempt}/10"
+            if curl --fail --silent --show-error \
+              http://127.0.0.1:3000/healthz
+            then
+              exit 0
+            fi
+            sleep 1
+          done
+
+          cat /tmp/project22-api.log
+          exit 1
+
+  terraform:
+    name: Terraform validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    defaults:
+      run:
+        working-directory: DevOps-Project-22
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Configure Terraform
+        uses: hashicorp/setup-terraform@v4.0.1
+        with:
+          terraform_version: "1.15.7"
+          terraform_wrapper: false
+
+      - name: Initialize Terraform
+        run: terraform init -backend=false -input=false
+
+      - name: Check Terraform formatting
+        run: terraform fmt -check -recursive
+
+      - name: Validate Terraform
+        run: terraform validate -no-color

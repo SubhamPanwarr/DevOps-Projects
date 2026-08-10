@@ -1,5 +1,9 @@
-const AWS = require("aws-sdk");
-const uuid = require('uuid');
+const {
+    S3Client,
+    PutObjectCommand,
+    DeleteObjectCommand
+} = require("@aws-sdk/client-s3");
+const { v4: uuidv4 } = require("uuid");
 
 const validator = require("email-validator");
 
@@ -9,6 +13,9 @@ const put = require(__dirname + "/put.js");
 const del = require(__dirname + "/delete.js");
 
 const saltRounds = 10;
+const s3 = new S3Client({
+    region: process.env.AWS_REGION || process.env.REGION || "ap-south-1"
+});
 
 const health = async (req, res) => {
     res.status(200);
@@ -702,30 +709,17 @@ const getProductImage = async (req, res) => {
     }
 }
 
-function uploadImage(image)
+async function uploadImage(image)
 {
-    return new Promise(async (resolve, reject) => {
-        AWS.config.update({
-            region: process.env.REGION
-        });
-        const s3 = new AWS.S3();
-        const fileContent = Buffer.from(image.data, 'binary');
-        const params = {
-            Bucket: process.env.S3_BUCKET,
-            Key: uuid.v4() + "/" + image.name,
-            Body: fileContent
-        }
-        s3.upload(params, (err, data) => {
-            if(err)
-            {
-                reject(err);
-            }
-            else 
-            {
-                resolve(data);
-            }
-        });
-    });    
+    const key = `${uuidv4()}/${image.name}`;
+    await s3.send(new PutObjectCommand({
+        Bucket: process.env.S3_BUCKET,
+        Key: key,
+        Body: Buffer.from(image.data),
+        ContentType: image.mimetype
+    }));
+
+    return { key };
 }
 
 const uploadProductImage = async (req, res) => {
@@ -824,24 +818,12 @@ const uploadProductImage = async (req, res) => {
     }
 }
 
-function deleteImage(key)
+async function deleteImage(key)
 {
-    return new Promise(async (resolve, reject) => {
-        AWS.config.update({
-            region: process.env.REGION
-        });
-        var s3 = new AWS.S3();
-        var params = {  Bucket: process.env.S3_BUCKET, Key: key };
-
-        s3.deleteObject(params, function(err, data) {
-        if (err)
-        {
-            reject(err);            
-        }            
-        else     
-            resolve();
-        });
-    });
+    await s3.send(new DeleteObjectCommand({
+        Bucket: process.env.S3_BUCKET,
+        Key: key
+    }));
 }
 
 const deleteProductImage = async (req, res) => {
