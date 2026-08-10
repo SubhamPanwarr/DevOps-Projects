@@ -1,264 +1,244 @@
-# AWS Fully Serverless Architecture with CI/CD
+# AWS Serverless API with Terraform and GitHub Actions
 
-## **Introduction:**
+A production-style Node.js API deployed on AWS using API Gateway, Lambda, Aurora Serverless v2, S3, Secrets Manager, VPC endpoints, CloudWatch, Terraform, and GitHub Actions.
 
-Enter the world of serverless computing, where developers are freed from server management. Deploying code becomes a breeze, with a focus on deploying functions rather than wrestling with servers. Originally synonymous with FaaS, serverless technology began with **AWS Lambda** from **Amazon Web Services**. It has now evolved to cover various managed services like databases and storage, expanding its scope beyond its initial function-centric approach.
+This implementation modernizes the original Project 22 application for Node.js 24, AWS SDK v3, Aurora Serverless v2, secure GitHub OIDC deployment, private networking, and binary image uploads.
 
-Despite its name, serverless doesn’t mean a server-free existence. Instead, it signals a shift in responsibility — developers no longer need to manage, provision, or see the underlying servers. This allows them to concentrate on crafting efficient code without the distractions of server intricacies.
+## Architecture
 
-In this article, we’ll explore a practical example of a Fully Serverless Architecture implemented using Terraform — a popular IaC tool and CI/CD implemented using GitHub Actions. The code repository we’ll be examining is hosted on GitHub: [GitHub Repository](https://github.com/NotHarshhaa/DevOps-Projects/tree/master/DevOps-Project-22)
+```mermaid
+flowchart TD
+    Users["API clients"] --> APIGW["API Gateway REST API"]
+    APIGW --> Lambda["Node.js 24 Lambda"]
 
-I have a NodeJS Cloud Native API which I have used to deploy in this architecture. This API is specifically designed to make use of AWS serverless services.
+    subgraph VPC["Private VPC"]
+        Lambda --> Aurora["Aurora Serverless v2 MySQL"]
+        Lambda --> SecretsEP["Secrets Manager endpoint"]
+        Lambda --> S3EP["S3 gateway endpoint"]
+    end
 
-**Architecture:**
-
-![](https://miro.medium.com/v2/resize:fit:1146/1*NN5kTCl1ljuIJ-2dfT7bMQ.gif)
-
-The aim of this project is to deploy API to AWS Public cloud using only serverless components.
-
-### API code is available [here](https://github.com/NotHarshhaa/DevOps-Projects/tree/master/DevOps-Project-22/serverless-api)
-
-Following are the serverless services used in this project:
-
-- API Gateway
-- Lambda
-- Aurora Serverless (MySql)
-- AWS Simple Storage Service (S3)
-- AWS Secrets Manager
-- AWS Certificate Manager (ACM)
-- Cloudwatch Logs and Metrics
-- Route53
-
-Secrets Manager stores the database credentials securely and the credentials are rotated every 7 days.
-Lambda is launched in the VPC private subnet. The access to secrets manager from within the VPC is through VPC Interface endpoint and access to S3 is through VPC Gateway Endpoint.
-
-## Terraform
-
-Terraform is an open-source infrastructure as code software tool that enables you to safely and predictably create, change, and improve infrastructure.
-
-## Setting up Infrastructure using Terraform
-
-The terraform init command initializes a working directory containing Terraform configuration files:
-
+    SecretsEP --> Secrets["AWS Secrets Manager"]
+    S3EP --> S3["Private encrypted S3 bucket"]
+    Lambda --> Logs["CloudWatch Logs"]
 ```
+
+The Lambda function runs in two private subnets across separate Availability Zones. It does not require a NAT gateway because database access stays inside the VPC and AWS service access uses VPC endpoints.
+
+## Deployed configuration
+
+| Component | Configuration |
+|---|---|
+| AWS Region | `ap-south-1` |
+| API stage | `dev` |
+| Lambda | Node.js 24, 512 MiB, 30-second timeout |
+| Database | Aurora MySQL `8.0.mysql_aurora.3.12.0` |
+| Aurora capacity | 0–1 ACU with automatic pause |
+| Networking | Two private subnets in separate Availability Zones |
+| S3 | Private access, AES-256 encryption, public access blocked |
+| Secrets | RDS-managed credentials in Secrets Manager |
+| API uploads | `multipart/form-data` configured as binary media |
+| Monitoring | CloudWatch Lambda logs |
+| Infrastructure | Terraform |
+| CI/CD identity | GitHub Actions OIDC with short-lived AWS credentials |
+
+The default API Gateway HTTPS URL is exposed through Terraform output. A custom Route 53 domain and ACM certificate are optional and disabled by default.
+
+## Security
+
+- Lambda, Aurora, and interface endpoints use dedicated security groups.
+- Aurora accepts database traffic only from the Lambda security group.
+- Lambda retrieves database credentials from Secrets Manager.
+- Secrets Manager is accessed through a private interface endpoint.
+- S3 is accessed through a private gateway endpoint.
+- The S3 bucket blocks public access and encrypts stored objects.
+- Aurora and its managed secret use AWS KMS encryption.
+- GitHub Actions uses OIDC instead of permanent AWS access keys.
+- The deployment role trusts only the `master` branch of this repository.
+- The deployment role can update only the Project 22 Lambda function.
+- JSON request and file-upload sizes are limited.
+- Production npm dependencies report zero known vulnerabilities at validation time.
+
+## Prerequisites
+
+- Terraform `>= 1.10.0, < 2.0.0`
+- AWS CLI v2
+- Node.js 24 and npm
+- Git
+- An AWS CLI profile with provisioning permissions
+
+Authenticate locally:
+
+```bash
+export AWS_PROFILE="devops-admin"
+export AWS_REGION="ap-south-1"
+export AWS_DEFAULT_REGION="ap-south-1"
+export AWS_PAGER=""
+
+aws sso login --profile "$AWS_PROFILE"
+aws sts get-caller-identity
+```
+
+## Terraform variables
+
+| Variable | Default | Purpose |
+|---|---:|---|
+| `region` | `ap-south-1` | AWS Region |
+| `aws_profile` | `devops-admin` | Local AWS CLI profile |
+| `cidr_block` | `10.22.0.0/16` | Application VPC CIDR |
+| `private_subnets` | `2` | Private subnet count |
+| `database` | `webapp` | Initial database name |
+| `aurora_engine_version` | `8.0.mysql_aurora.3.12.0` | Aurora MySQL version |
+| `api_stage` | `dev` | API stage and name suffix |
+| `lambda_memory_size` | `512` | Lambda memory in MiB |
+| `enable_custom_domain` | `false` | Enable ACM and Route 53 integration |
+| `domain` | empty | Custom API hostname |
+| `hosted_zone_name` | empty | Route 53 public hosted zone |
+
+Override defaults through a `.tfvars` file or `-var` arguments. Do not commit credentials or sensitive values.
+
+## Deploying the infrastructure
+
+```bash
 terraform init
+terraform fmt -check -recursive
+terraform validate
+terraform plan -out=project22.tfplan
+terraform apply project22.tfplan
 ```
 
-The terraform plan command creates an execution plan, which lets you preview the changes that Terraform plans to make to your infrastructure:
+Display deployment information:
 
-```
-terraform plan
-```
-
-The terraform apply command executes the actions proposed in a Terraform plan to create, update, or destroy infrastructure:
-
-```
-terraform apply
+```bash
+terraform output
+terraform output -raw api_invoke_url
+terraform output -raw healthcheck_url
+terraform output -raw lambda_function_name
+terraform output -raw artifact_bucket_name
 ```
 
-The terraform destroy command is a convenient way to destroy all remote objects managed by a particular Terraform configuration:
+Check for drift:
 
+```bash
+terraform plan -detailed-exitcode
 ```
-terraform destroy
-```
 
-## **Key Services and Features:**
+Exit code `0` means no drift, `2` means changes are present, and `1` means the plan failed.
 
-Let’s explore the key services and features of this AWS Architecture:
+## Running locally
 
-1. **AWS Lambda:**  
-    AWS Lambda, the pioneer in serverless computing, introduces virtual functions that eliminate the need for manual server management. With a focus on short executions, Lambda operates on-demand, ensuring efficient resource utilization. Its automated scaling feature adapts seamlessly to varying workloads, guaranteeing optimal performance. Lambda is Integrated with many programming languages and a whole AWS suite of services and can easily be monitored through AWS CloudWatch. **AWS Lambda** serves as an ideal solution for executing our Cloud Native API code efficiently, all while maintaining minimal costs.
-
-2. **Aurora Serverless:**  
-    Aurora, a powerhouse in the realm of cloud databases, seamlessly supports both Postgres and MySQL. Positioned as “AWS cloud optimized,” Aurora boasts a remarkable 5x performance improvement over MySQL on RDS and over 3x the performance over Postgres on RDS. Offering up to 15 replicas with a replication process faster than MySQL. With instantaneous failover, it is inherently designed for High Availability (HA), although it comes at a slightly higher cost than RDS (20% more), its efficiency and performance make it a compelling choice to store our API’s structured data.
-
-3. **Amazon Simple Storage Service (S3):**  
-    S3 is one of the very popular offerings from AWS. S3 is highly available and durable object based storage service. S3 allows storing objects (files) in buckets with globally unique name. In this case, we are using S3 to store API’s binary image data (JPEG, JPG, PNG).
-
-4. **API Gateway: AWS Lambda** coupled with **API Gateway** presents a hassle-free solution with zero infrastructure management. API Gateway not only supports HTTP, REST Protocols but also the WebSocket Protocol and also adeptly handles API versioning (such as v1, v2) and diverse environments (dev, test, prod). API Gateway also covers authentication and authorization, along with the ability to create API keys and manage request throttling. Additionally, it excels in transforming and validating requests and responses, allowing for the generation of SDKs and API specifications. With the added capability to cache API responses, API Gateway offer a comprehensive and efficient ecosystem for developing and managing APIs.
-
-Some of the managed services used in this Architecture are:
-
-1. **AWS CloudWatch:**
-    Amazon CloudWatch is a robust monitoring and observability service provided by AWS, enabling users to collect and track metrics, collect and monitor log files, and set alarms. Logs and Metrics from Lambda functions are sent to CloudWatch for troubleshooting and observability purposes.
-
-2. **VPC:** The foundation of AWS Infrastructure is the VPC, which isolates resources and provides a private network for the application. VPC can be divided into multiple public (With Internet connectivity) and private subnets.
-
-3. **Amazon Route53:** A highly available, scalable, fully managed and *Authoritative* DNS. The only AWS service which provides 100% availability SLA. It is also a Domain Registrar. Route 53 translates human friendly hostnames into machine IP addresses.
-
-# **Security Considerations:**
-
-1. **AWS Certificate Manager (ACM):**
-    Responsible for Managing, Provisioning and deploying TLS certificates. SSL/TLS certificates provides security in transit for HTTP websites (HTTPS). Supports both public and private TLS certificates. Free of charge. ACM is used to load/associate TLS certificates on Application load balancer, API Gateway, CloudFront, etc.
-
-2. **AWS Secrets Manager:** AWS Secrets Manager is meant for storing secrets. It has the capability to rotate secrets every X days (automates the generation of new secrets on rotation by making use of Lambda in the background). It is tightly Integrated with Amazon RDS (MySQL, PostgreSQL, Aurora), so it can securely store the database credentials. Secrets that are stored in Secrets Manager are encrypted using Key Management Service (KMS).
-
-3. **Security Groups:** Security groups act as firewall for all the instances like EC2, Lambda (through ENI), Interface Endpoints (through ENI), Databases, within the VPC. In the above architecture, Security groups were used to restrict access to database. Further, we can use security groups to restrict access to Interface endpoint that is responsible for accessing Secrets Manager.
-
-4. **VPC Endpoints:** Utilizing VPC Endpoints, enables the establishment of connections to AWS services through a **private network** rather than relying on the public Internet. These endpoints are designed to be both redundant and horizontally scalable. **IGW** and **NATGW** can be avoided to access the AWS services. In our case, we used VPC Interface endpoint (deploys ENI within the subnet) to access secrets manager privately from within the VPC and VPC Gateway endpoint (deploys a Gateway, must be used as a target in the route tables) to access S3 privately from within the VPC.
-
-5. **IAM ROLES:** Lambda functions in the private subnets are assigned an IAM role with necessary permissions to send Logs and Metrics to CloudWatch, access S3 bucket, access Aurora database and also to create, describe and delete Elastic Network Interface (ENI) for lambda within the VPC.
-
-# **CI/CD:**
-
-CI and CD stand for continuous integration and continuous delivery/ deployment. In very simple terms, **Continuous Integration** is a modern software development practice in which incremental code changes are made frequently and reliably to a central code repository like GitHub, Bit Bucket, etc. and **Continuous Delivery** is a software development practice that works in conjunction with CI, CD takes over during the final stages to ensure it’s packaged with everything it needs to deploy to any environment at any time (where as, **Continuous deployment** deploys the applications automatically, eliminating the need for human intervention). The CI/CD pipeline for the above architecture consists of the following:
-
-![](https://miro.medium.com/v2/resize:fit:802/1*xo6Jp9JX8JBOMi5YIGkm_Q.jpeg)
-
-1. **Git:** Git is a distributed version control system that tracks the changes in your application code. Application code can be committed and pushed to a remote cloud version control service like **Github**.
-
-2. **Github Actions:** Github Actions is a feature of Github that Automates the building, testing and deployment of your application code. When a developer raises a Pull Request, a Github Actions workflow can be triggered to run a series of tests before merging the latest code to the main repository. In the above pipeline, after merging the latest code, another Github Actions Workflow can be triggered to build or package the latest code and deploy to Lambda using **AWS CLI** commands.
-
-A **dedicated IAM user** with relevant permissions can be created for Github Actions for deployment. **Access keys** and **secret keys** can be passed through Github Actions Secrets in the workflow configuration.
-
-# Serverless-api
-
-This Cloud Native API is designed to run on AWS Infrastructure while making use of AWS serverless services like Secrets Manager, Lambda functions, API Gateway, etc.
-
-## Prerequisites for running the application locally
-
-```javascript
-// install dependencies
-npm install
-// start the server script
+```bash
+cd serverless-api
+npm ci
+npm audit --omit=dev
+node --check index.js
+find api -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check
 npm start
-// run test cases
-npm test
 ```
 
-## Endpoint URLs
+The local health endpoint is `http://127.0.0.1:3000/healthz`. Database-backed routes require the expected database and Secrets Manager environment variables. The health endpoint is intentionally independent of database initialization.
 
-```javascript
-// 1. Route to check if the server is healthy
-GET /healthz
-// 2. GET route to retrieve user details
-GET /v1/user/{userId}
-// 3. POST route to add a new user to the database
-POST /v1/user
-// 4. PUT route to update user details
-PUT /v1/user/{userId}
+## API endpoints
+
+Set the deployed base URL:
+
+```bash
+API_URL="$(terraform output -raw api_invoke_url)"
 ```
 
-### Sample JSON Response for GET
+| Method | Endpoint | Authentication | Purpose |
+|---|---|---|---|
+| GET | `/healthz` | Public | Application health |
+| POST | `/user` | Public | Create a user |
+| GET | `/user/{userId}` | Basic Auth | Retrieve the authenticated user |
+| PUT | `/user/{userId}` | Basic Auth | Update the authenticated user |
+| GET | `/product/{productId}` | Public | Retrieve product details |
+| POST | `/product` | Basic Auth | Create a product |
+| PUT | `/product/{productId}` | Owner Basic Auth | Fully update a product |
+| PATCH | `/product/{productId}` | Owner Basic Auth | Partially update a product |
+| DELETE | `/product/{productId}` | Owner Basic Auth | Delete a product |
+| GET | `/product/{productId}/image` | Basic Auth | List product images |
+| POST | `/product/{productId}/image` | Owner Basic Auth | Upload an image |
+| GET | `/product/{productId}/image/{imageId}` | Basic Auth | Retrieve image metadata |
+| DELETE | `/product/{productId}/image/{imageId}` | Owner Basic Auth | Delete image metadata and S3 object |
 
-```json
-{
-  "id": 1,
-  "first_name": "Jane",
-  "last_name": "Doe",
-  "username": "jane.doe@example.com",
-  "account_created": "2016-08-29T09:12:33.001Z",
-  "account_updated": "2016-08-29T09:12:33.001Z"
-}
+Protected routes use HTTP Basic Authentication:
+
+```bash
+curl --user 'user@example.com:password' "${API_URL}/user/1"
 ```
 
-### Sample JSON Request for POST
+## Binary image handling
 
-```json
-{
-  "username": "jane.doe@example.com",
-  "password": "password",
-  "first_name": "Jane",
-  "last_name": "Doe",  
-}
+API Gateway declares `multipart/form-data` as a binary media type. This prevents binary files from being converted to UTF-8 text before reaching Lambda.
+
+```bash
+curl --request POST \
+  --user 'user@example.com:password' \
+  --form 'image=@test.png;type=image/png' \
+  "${API_URL}/product/1/image"
 ```
 
-### Sample JSON Request for PUT
+Uploaded images are stored in the private S3 bucket, while image metadata is stored in Aurora.
 
-```json
-{
-  "password": "password",
-  "first_name": "Jane",
-  "last_name": "Doe",  
-}
+## CI/CD
+
+```mermaid
+flowchart LR
+    Developer["Developer"] --> GitHub["GitHub repository"]
+    GitHub --> CI["Project 22 CI"]
+    CI --> Merge["Merge to master"]
+    Merge --> OIDC["GitHub OIDC"]
+    OIDC --> Deploy["Lambda deployment"]
+    Deploy --> Health["API health check"]
 ```
 
-## Endpoint URLs
+### Continuous integration
 
-```javascript
-// 1. GET route to retrieve product details
-GET /v1/product/{productId}
-// 2. POST route to add a new product to the database
-POST /v1/product
-// 3. PUT route to update product details
-PUT /v1/product/{productId}
-// 4. PATCH route to update product details partially
-PUT /v1/product/{productId}
-// 5. DELETE route to delete product details
-PUT /v1/product/{productId}
+`.github/workflows/project22-ci.yml` runs for Project 22 pushes and pull requests. It performs Node.js 24 setup, `npm ci`, a production dependency audit, JavaScript syntax validation, a local health check, Terraform initialization without a backend, Terraform formatting validation, and Terraform configuration validation. CI receives no AWS credentials.
+
+### Continuous deployment
+
+`.github/workflows/project22-deploy.yml` runs when Project 22 application code reaches `master`. It validates and packages the application, requests a GitHub OIDC token, assumes the least-privilege deployment role, updates the Lambda function, waits for the update, and verifies the deployed health endpoint.
+
+The AWS trust policy permits only:
+
+```text
+repo:SubhamPanwarr/DevOps-Projects:ref:refs/heads/master
 ```
 
-### Sample JSON Response for GET
+No AWS access key or secret key is stored in GitHub.
 
-```json
-{
-  "id": 1,
-  "name": null,
-  "description": null,
-  "sku": null,
-  "manufacturer": null,
-  "quantity": 1,
-  "date_added": "2016-08-29T09:12:33.001Z",
-  "date_last_updated": "2016-09-29T09:12:33.001Z",
-  "owner_user_id": 1
-}
+## Operational verification
+
+```bash
+aws lambda get-function-configuration \
+  --function-name project22-serverless-api-dev \
+  --query '{State:State,Update:LastUpdateStatus,Runtime:Runtime,Memory:MemorySize,Timeout:Timeout}' \
+  --output table
+
+aws logs tail \
+  /aws/lambda/project22-serverless-api-dev \
+  --since 20m \
+  --follow
+
+curl --fail --silent --show-error \
+  "$(terraform output -raw healthcheck_url)"
 ```
 
-### Sample JSON Request for POST
+## Cleanup
 
-```json
-{
-  "name": null,
-  "description": null,
-  "sku": null,
-  "manufacturer": null,
-  "quantity": 1
-}
+Review the destruction plan before applying it:
+
+```bash
+terraform plan -destroy -out=project22-destroy.tfplan
+terraform show -no-color project22-destroy.tfplan
+terraform apply project22-destroy.tfplan
 ```
 
-### Sample JSON Request for PUT
+Destruction permanently removes the database, stored images, API, Lambda function, IAM deployment role, and GitHub OIDC provider managed by this Terraform state.
 
-```json
-{
-  "name": null,
-  "description": null,
-  "sku": null,
-  "manufacturer": null,
-  "quantity": 1
-}
-```
+## Repository
 
-### Sample JSON Request for PATCH
+Project implementation: [SubhamPanwarr/DevOps-Projects](https://github.com/SubhamPanwarr/DevOps-Projects/tree/master/DevOps-Project-22)
 
-```json
-{
-  "name": null,
-  "description": null,
-  "sku": null,
-  "manufacturer": null,
-  "quantity": 1
-}
-```
-
----
-
-## 🛠️ Author & Community  
-
-This project is crafted by **[Harshhaa](https://github.com/NotHarshhaa)** 💡.  
-I’d love to hear your feedback! Feel free to share your thoughts.  
-
-📧 **Connect with me:**
-
-- **GitHub**: [@NotHarshhaa](https://github.com/NotHarshhaa)
-- **Blog**: [ProDevOpsGuy](https://blog.prodevopsguytech.com)  
-- **Telegram Community**: [Join Here](https://t.me/prodevopsguy)  
-
----
-
-## ⭐ Support the Project  
-
-If you found this helpful, consider **starring** ⭐ the repository and sharing it with your network! 🚀  
-
-### 📢 Stay Connected  
-
-![Follow Me](https://imgur.com/2j7GSPs.png)
+This project was modernized from the original educational implementation by [NotHarshhaa](https://github.com/NotHarshhaa/DevOps-Projects/tree/master/DevOps-Project-22).

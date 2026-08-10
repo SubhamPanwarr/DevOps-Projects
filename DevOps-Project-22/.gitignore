@@ -15,6 +15,12 @@ crash.log
 # example.tfvars
 terraform.tfvars
 
+# Local plans, Lambda bundles, and downloaded migration patches
+*.tfplan
+serverless-api.zip
+serverless-api/project22-sdk-v3.patch
+project22-terraform-modernization.patch
+
 # Ignore override files as they are usually used to override resources locally and so
 # are not checked in
 override.tf

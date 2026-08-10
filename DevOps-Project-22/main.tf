@@ -35,9 +35,9 @@ resource "aws_security_group" "endpoint_sg" {
   description = "Interface Endpoint security group to allow inbound/outbound from the VPC"
   vpc_id      = aws_vpc.dev_vpc.id
   ingress {
-    from_port       = 0
-    to_port         = 0
-    protocol        = "-1"
+    from_port       = 443
+    to_port         = 443
+    protocol        = "tcp"
     security_groups = [aws_security_group.lambda_sg.id]
   }
   egress {
@@ -117,31 +117,35 @@ resource "aws_security_group" "lambda_sg" {
 
 # Create a DB subnet group
 resource "aws_db_subnet_group" "private_db_subnet_group" {
-  name       = "private_db_subnet_group"
+  name       = "project22-${var.api_stage}-db-subnets"
   subnet_ids = [for s in aws_subnet.private_subnet : s.id]
 }
 
 resource "aws_kms_key" "aurora_kms_key" {
-  description = "My Aurora KMS key"
+  description             = "Project 22 Aurora master-secret encryption key"
+  enable_key_rotation     = true
+  deletion_window_in_days = 7
 }
 
 resource "aws_rds_cluster" "aurora_cluster" {
-  cluster_identifier            = "serverless-cluster"
+  cluster_identifier            = "project22-${var.api_stage}-aurora"
   engine                        = "aurora-mysql"
   engine_mode                   = "provisioned"
-  engine_version                = "8.0.mysql_aurora.3.02.0"
-  database_name                 = "webapp"
+  engine_version                = var.aurora_engine_version
+  database_name                 = var.database
   db_subnet_group_name          = aws_db_subnet_group.private_db_subnet_group.name
   vpc_security_group_ids        = [aws_security_group.db-sg.id]
   master_username               = "admin"
   manage_master_user_password   = true
   storage_encrypted             = true
   master_user_secret_kms_key_id = aws_kms_key.aurora_kms_key.key_id
+  backup_retention_period       = 1
   skip_final_snapshot           = true
 
   serverlessv2_scaling_configuration {
-    max_capacity = 1.0
-    min_capacity = 0.5
+    max_capacity             = 1.0
+    min_capacity             = 0
+    seconds_until_auto_pause = 300
   }
 }
 
@@ -150,11 +154,12 @@ resource "aws_rds_cluster" "aurora_cluster" {
 # }
 
 resource "aws_rds_cluster_instance" "aurora_instance" {
-  cluster_identifier = aws_rds_cluster.aurora_cluster.id
-  instance_class     = "db.serverless"
-  engine             = aws_rds_cluster.aurora_cluster.engine
-  engine_version     = aws_rds_cluster.aurora_cluster.engine_version
-  # publicly_accessible = true
+  identifier          = "project22-${var.api_stage}-aurora-1"
+  cluster_identifier  = aws_rds_cluster.aurora_cluster.id
+  instance_class      = "db.serverless"
+  engine              = aws_rds_cluster.aurora_cluster.engine
+  engine_version      = aws_rds_cluster.aurora_cluster.engine_version
+  publicly_accessible = false
 }
 
 # Generate a random name for the S3 bucket.
@@ -166,7 +171,7 @@ resource "random_id" "random" {
 #Create a private S3 bucket.
 
 resource "aws_s3_bucket" "private_bucket" {
-  bucket        = "my-bucket-${random_id.random.hex}"
+  bucket        = "project22-${data.aws_caller_identity.current.account_id}-${var.region}-${random_id.random.hex}"
   force_destroy = true
 }
 
@@ -203,7 +208,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "this" {
 # Create an S3 access policy to the above role.
 
 resource "aws_iam_policy" "S3_policy" {
-  name        = "WebAppS3"
+  name_prefix = "Project22LambdaS3-"
   description = "Policy for accessing S3 bucket"
 
   policy = jsonencode({
@@ -226,26 +231,6 @@ resource "aws_iam_policy" "S3_policy" {
 }
 
 data "aws_caller_identity" "current" {}
-
-resource "aws_iam_policy" "aurora_policy" {
-  name        = "aurora_policy"
-  description = "Policy to access aurora instance"
-
-  policy = jsonencode({
-    "Version" : "2012-10-17",
-    "Statement" : [
-      {
-        "Effect" : "Allow",
-        "Action" : [
-          "rds-db:connect"
-        ],
-        "Resource" : [
-          "arn:aws:rds-db:${var.region}:${data.aws_caller_identity.current.account_id}:dbuser:${aws_rds_cluster.aurora_cluster.id}/${aws_rds_cluster.aurora_cluster.master_username}"
-        ]
-      }
-    ]
-  })
-}
 
 resource "aws_iam_policy" "lambda_rds_secret_policy" {
   name_prefix = "LambdaRdsSecretPolicy-"
@@ -275,7 +260,7 @@ resource "aws_iam_policy" "lambda_rds_secret_policy" {
 # Create an IAM Role for S3 Access.
 
 resource "aws_iam_role" "lambda_s3_aurora" {
-  name = "lambda-s3"
+  name = "project22-lambda-${var.api_stage}"
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -290,27 +275,13 @@ resource "aws_iam_role" "lambda_s3_aurora" {
   })
 }
 
-resource "aws_iam_policy" "lambda_eni_policy" {
-  name        = "eni_policy"
-  description = "Policy to access EC2 ENI in VPC"
-  policy = jsonencode({
-    "Version" : "2012-10-17",
-    "Statement" : [
-      {
-        "Effect" : "Allow",
-        "Action" : [
-          "ec2:CreateNetworkInterface",
-          "ec2:DescribeNetworkInterfaces",
-          "ec2:DeleteNetworkInterface"
-        ],
-        "Resource" : "*"
-      }
-    ]
-  })
-}
-
 resource "aws_iam_role_policy_attachment" "lambda_basic_policy_attachment" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+  role       = aws_iam_role.lambda_s3_aurora.name
+}
+
+resource "aws_iam_role_policy_attachment" "lambda_vpc_policy_attachment" {
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
   role       = aws_iam_role.lambda_s3_aurora.name
 }
 
@@ -319,22 +290,33 @@ resource "aws_iam_role_policy_attachment" "lambda_basic_policy_attachment" {
 resource "aws_iam_role_policy_attachment" "role_attachment" {
   for_each = {
     "s3" : aws_iam_policy.S3_policy.arn,
-    "aurora" : aws_iam_policy.aurora_policy.arn,
-    "eni" : aws_iam_policy.lambda_eni_policy.arn,
     "secret" : aws_iam_policy.lambda_rds_secret_policy.arn
   }
   policy_arn = each.value
   role       = aws_iam_role.lambda_s3_aurora.name
 }
 
+data "archive_file" "api_lambda" {
+  type        = "zip"
+  source_dir  = "${path.module}/serverless-api"
+  output_path = "${path.module}/serverless-api.zip"
+
+  excludes = [
+    ".env",
+    ".gitignore",
+    "project22-sdk-v3.patch"
+  ]
+}
+
 resource "aws_lambda_function" "api_lambda" {
-  filename         = var.artifact_location
-  function_name    = "serverless_api"
+  filename         = data.archive_file.api_lambda.output_path
+  function_name    = "project22-serverless-api-${var.api_stage}"
   role             = aws_iam_role.lambda_s3_aurora.arn
   handler          = "index.handler"
-  source_code_hash = filebase64sha256(var.artifact_location)
+  source_code_hash = data.archive_file.api_lambda.output_base64sha256
 
-  runtime = "nodejs16.x"
+  runtime     = "nodejs24.x"
+  memory_size = var.lambda_memory_size
 
   vpc_config {
     subnet_ids         = [for s in aws_subnet.private_subnet : s.id]
@@ -353,7 +335,18 @@ resource "aws_lambda_function" "api_lambda" {
       SECRET_ID = aws_rds_cluster.aurora_cluster.master_user_secret[0].secret_arn
     }
   }
+  depends_on = [
+    aws_iam_role_policy_attachment.lambda_basic_policy_attachment,
+    aws_iam_role_policy_attachment.lambda_vpc_policy_attachment,
+    aws_iam_role_policy_attachment.role_attachment
+  ]
+
   timeout = 30
+}
+
+resource "aws_cloudwatch_log_group" "api_lambda" {
+  name              = "/aws/lambda/${aws_lambda_function.api_lambda.function_name}"
+  retention_in_days = 7
 }
 
 resource "aws_lambda_permission" "permissions" {
@@ -382,8 +375,9 @@ resource "aws_lambda_permission" "permissions" {
 }
 
 resource "aws_api_gateway_rest_api" "api_gateway" {
-  name        = "Inventory-Management-API"
-  description = "Inventory Management API"
+  name               = "Inventory-Management-API"
+  description        = "Inventory Management API"
+  binary_media_types = ["multipart/form-data"]
   endpoint_configuration {
     types = ["REGIONAL"]
   }
@@ -609,7 +603,7 @@ resource "aws_api_gateway_integration" "any_integration" {
 resource "aws_api_gateway_integration" "any_any_integration" {
   rest_api_id             = aws_api_gateway_rest_api.api_gateway.id
   resource_id             = aws_api_gateway_resource.any.id
-  http_method             = aws_api_gateway_method.any.http_method
+  http_method             = aws_api_gateway_method.any_any.http_method
   integration_http_method = "POST"
   type                    = "AWS_PROXY"
   uri                     = aws_lambda_function.api_lambda.invoke_arn
@@ -797,26 +791,47 @@ resource "aws_api_gateway_integration" "any_product_image_integration" {
 
 resource "aws_api_gateway_deployment" "my_api_gateway_deployment" {
   rest_api_id = aws_api_gateway_rest_api.api_gateway.id
-  stage_name  = var.api_stage
+
   triggers = {
-    redeployment = sha1(jsonencode(aws_api_gateway_rest_api.api_gateway.body))
+    redeployment = sha1(jsonencode([
+      aws_api_gateway_integration.any_integration.id,
+      aws_api_gateway_integration.any_any_integration.id,
+      aws_api_gateway_integration.any_healthz_integration.id,
+      aws_api_gateway_integration.any_user_integration.id,
+      aws_api_gateway_integration.any_user_1_integration.id,
+      aws_api_gateway_integration.any_product_integration.id,
+      aws_api_gateway_integration.any_product_1_integration.id,
+      aws_api_gateway_integration.any_product_images_integration.id,
+      aws_api_gateway_integration.any_product_image_integration.id,
+      aws_api_gateway_rest_api.api_gateway.binary_media_types
+    ]))
   }
 
   lifecycle {
     create_before_destroy = true
   }
 
-  depends_on = [aws_api_gateway_integration.any_product_image_integration]
+}
+
+resource "aws_api_gateway_stage" "api" {
+  deployment_id = aws_api_gateway_deployment.my_api_gateway_deployment.id
+  rest_api_id   = aws_api_gateway_rest_api.api_gateway.id
+  stage_name    = var.api_stage
 }
 
 data "aws_acm_certificate" "ssl_certificate" {
-  domain   = var.domain
-  statuses = ["ISSUED"]
+  count = var.enable_custom_domain ? 1 : 0
+
+  domain      = var.domain
+  statuses    = ["ISSUED"]
+  most_recent = true
 }
 
 resource "aws_api_gateway_domain_name" "domain" {
+  count = var.enable_custom_domain ? 1 : 0
+
   domain_name              = var.domain
-  regional_certificate_arn = data.aws_acm_certificate.ssl_certificate.arn
+  regional_certificate_arn = data.aws_acm_certificate.ssl_certificate[0].arn
 
   endpoint_configuration {
     types = ["REGIONAL"]
@@ -824,24 +839,31 @@ resource "aws_api_gateway_domain_name" "domain" {
 }
 
 data "aws_route53_zone" "zone" {
-  name = var.domain
+  count = var.enable_custom_domain ? 1 : 0
+
+  name         = var.hosted_zone_name
+  private_zone = false
 }
 
 # Route53 is not specifically required; any DNS host can be used.
 resource "aws_route53_record" "a_record" {
-  name    = aws_api_gateway_domain_name.domain.domain_name
+  count = var.enable_custom_domain ? 1 : 0
+
+  name    = aws_api_gateway_domain_name.domain[0].domain_name
   type    = "A"
-  zone_id = data.aws_route53_zone.zone.id
+  zone_id = data.aws_route53_zone.zone[0].zone_id
 
   alias {
     evaluate_target_health = true
-    name                   = aws_api_gateway_domain_name.domain.regional_domain_name
-    zone_id                = aws_api_gateway_domain_name.domain.regional_zone_id
+    name                   = aws_api_gateway_domain_name.domain[0].regional_domain_name
+    zone_id                = aws_api_gateway_domain_name.domain[0].regional_zone_id
   }
 }
 
 resource "aws_api_gateway_base_path_mapping" "path_mapping" {
+  count = var.enable_custom_domain ? 1 : 0
+
   api_id      = aws_api_gateway_rest_api.api_gateway.id
-  stage_name  = aws_api_gateway_deployment.my_api_gateway_deployment.stage_name
-  domain_name = aws_api_gateway_domain_name.domain.domain_name
+  stage_name  = aws_api_gateway_stage.api.stage_name
+  domain_name = aws_api_gateway_domain_name.domain[0].domain_name
 }

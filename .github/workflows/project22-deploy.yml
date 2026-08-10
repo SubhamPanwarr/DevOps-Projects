@@ -1,0 +1,122 @@
+name: Project 22 Deploy
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - "DevOps-Project-22/serverless-api/**"
+      - ".github/workflows/project22-deploy.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: project22-dev-deployment
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy Lambda
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      AWS_REGION: ap-south-1
+      AWS_ACCOUNT_ID: "248847837354"
+      LAMBDA_FUNCTION_NAME: project22-serverless-api-dev
+      HEALTHCHECK_URL: https://82ndw3l937.execute-api.ap-south-1.amazonaws.com/dev/healthz
+      APP_DIRECTORY: DevOps-Project-22/serverless-api
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Configure Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: DevOps-Project-22/serverless-api/package-lock.json
+
+      - name: Install and validate application
+        working-directory: ${{ env.APP_DIRECTORY }}
+        run: |
+          npm ci
+          npm audit --omit=dev
+
+          node --check index.js
+          find api -type f -name '*.js' -print0 |
+            xargs -0 -r -n1 node --check
+
+      - name: Run local health check
+        working-directory: ${{ env.APP_DIRECTORY }}
+        run: |
+          node index.js >/tmp/project22-api.log 2>&1 &
+          api_pid=$!
+          trap 'kill "$api_pid" 2>/dev/null || true' EXIT
+
+          for attempt in $(seq 1 10); do
+            echo "Health check attempt ${attempt}/10"
+            if curl --fail --silent --show-error \
+              http://127.0.0.1:3000/healthz
+            then
+              exit 0
+            fi
+            sleep 1
+          done
+
+          cat /tmp/project22-api.log
+          exit 1
+
+      - name: Build Lambda deployment package
+        working-directory: ${{ env.APP_DIRECTORY }}
+        run: |
+          npm prune --omit=dev
+          rm -f "${GITHUB_WORKSPACE}/serverless-api.zip"
+
+          zip -q -r "${GITHUB_WORKSPACE}/serverless-api.zip" . \
+            -x '.env' '.env.*' '*.log'
+
+          unzip -t "${GITHUB_WORKSPACE}/serverless-api.zip"
+          ls -lh "${GITHUB_WORKSPACE}/serverless-api.zip"
+
+      - name: Configure short-lived AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: arn:aws:iam::248847837354:role/project22-github-actions-deploy
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: project22-${{ github.run_id }}
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Deploy Lambda code
+        run: |
+          aws lambda update-function-code \
+            --function-name "${LAMBDA_FUNCTION_NAME}" \
+            --zip-file "fileb://${GITHUB_WORKSPACE}/serverless-api.zip" \
+            --query '{FunctionName:FunctionName,Runtime:Runtime,CodeSize:CodeSize,LastModified:LastModified}' \
+            --output table
+
+          aws lambda wait function-updated-v2 \
+            --function-name "${LAMBDA_FUNCTION_NAME}"
+
+          aws lambda get-function-configuration \
+            --function-name "${LAMBDA_FUNCTION_NAME}" \
+            --query '{State:State,LastUpdate:LastUpdateStatus,Runtime:Runtime}' \
+            --output table
+
+      - name: Verify deployed health endpoint
+        run: |
+          curl --fail \
+            --silent \
+            --show-error \
+            --retry 12 \
+            --retry-delay 5 \
+            --retry-all-errors \
+            "${HEALTHCHECK_URL}"
+          echo
