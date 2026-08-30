@@ -6,7 +6,8 @@ pipeline {
     }
 
     environment {
-        APP_DIR = 'DevOps-Project-33/DevSecOps-CI-CD-Pipeline'
+        APP_DIR   = 'DevOps-Project-33/DevSecOps-CI-CD-Pipeline'
+        IMAGE_NAME = 'project33-jpetstore'
     }
 
     stages {
@@ -20,8 +21,11 @@ pipeline {
                     echo "===== Maven ====="
                     mvn -version
 
-                    echo "===== Git ====="
-                    git --version
+                    echo "===== Docker ====="
+                    docker --version
+
+                    echo "===== Trivy ====="
+                    trivy --version
                 '''
             }
         }
@@ -68,25 +72,90 @@ pipeline {
         stage('Package WAR') {
             steps {
                 dir("${APP_DIR}") {
-                    sh 'mvn -B package -DskipTests'
-                    sh 'ls -lh target/jpetstore.war'
+                    sh '''
+                        mvn -B package -DskipTests
+                        ls -lh target/jpetstore.war
+                    '''
+                }
+            }
+        }
+
+        stage('OWASP Dependency Check') {
+            steps {
+                dir("${APP_DIR}") {
+                    dependencyCheck(
+                        odcInstallation: 'dependency-check',
+                        additionalArguments: '''
+                            --scan .
+                            --format XML
+                            --prettyPrint
+                        '''
+                    )
+                }
+            }
+
+            post {
+                always {
+                    dependencyCheckPublisher(
+                        pattern: '**/dependency-check-report.xml'
+                    )
+                }
+            }
+        }
+
+        stage('Docker Build') {
+            steps {
+                dir("${APP_DIR}") {
+                    sh '''
+                        docker build \
+                          -t ${IMAGE_NAME}:${BUILD_NUMBER} .
+
+                        docker image inspect \
+                          ${IMAGE_NAME}:${BUILD_NUMBER}
+                    '''
+                }
+            }
+        }
+
+        stage('Trivy Image Scan') {
+            steps {
+                dir("${APP_DIR}") {
+                    sh '''
+                        trivy image \
+                          --severity HIGH,CRITICAL \
+                          --ignore-unfixed \
+                          --exit-code 0 \
+                          --format table \
+                          --output trivy-image.txt \
+                          ${IMAGE_NAME}:${BUILD_NUMBER}
+
+                        echo "===== Trivy Report ====="
+                        cat trivy-image.txt
+                    '''
                 }
             }
         }
     }
 
     post {
+
         success {
-            echo 'Project 33 CI baseline completed successfully.'
+            echo 'Project 33 DevSecOps CI security baseline completed successfully.'
         }
 
         failure {
-            echo 'Project 33 CI baseline failed.'
+            echo 'Project 33 pipeline failed. Check the failed stage.'
         }
 
         always {
+
             junit allowEmptyResults: true,
                   testResults: 'DevOps-Project-33/DevSecOps-CI-CD-Pipeline/target/surefire-reports/*.xml'
+
+            archiveArtifacts(
+                artifacts: 'DevOps-Project-33/DevSecOps-CI-CD-Pipeline/trivy-image.txt, DevOps-Project-33/DevSecOps-CI-CD-Pipeline/dependency-check-report.xml',
+                allowEmptyArchive: true
+            )
         }
     }
 }
